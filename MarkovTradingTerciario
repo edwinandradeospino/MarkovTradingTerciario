@@ -1,0 +1,1168 @@
+// MarkovTradingTerciario.cs - v5.1
+// ═══════════════════════════════════════════════════════════════════════════
+// CORRECCIONES v5.1 (sobre v5.0):
+//
+//   [FIX-D1] Lógica de escape JERÁRQUICA — igual que MultiBricksDataExporterNeta.
+//            Una sola barra procesa UN solo nivel (el de mayor jerarquía).
+//            Antes: los 3 niveles se evaluaban siempre de forma independiente.
+//
+//   [FIX-D4] Clasificación de coherencia CORREGIDA:
+//            - Añadida zona COHERENTE (fnDisplay > 0) que faltaba en E2.
+//            - Umbral divergente pasado como POSITIVO (53.8) y comparado
+//              con Math.Abs, igual que el exportador usa -UmbralDivergente.
+//            - Antes: un bloque ALCISTA con fnDisplay=50 se clasificaba
+//              como DIV_DEBIL; ahora se clasifica correctamente como COHERENTE.
+//
+//   [FIX-D5] Contexto primario/secundario ACTIVO en el momento del trigger.
+//            Al detectar un trigger se congela etiqPrimarioEnTrigger y
+//            etiqSecundarioEnTrigger (el bloque que CONTIENE al terciario),
+//            igual que el exportador usa idSecundarioActivo / idPrimarioActivo.
+//            Antes: se usaba el último cerrado, que podía ser obsoleto.
+//
+//   [FIX-D6] Cascada coordinada en escapes superiores.
+//            Cuando el secundario o primario escapan, el terciario se cierra
+//            como parte de la cascada, sin generar un cierre independiente
+//            previo. Implementado con flag _escapeSuperiorEnCurso.
+//
+//   [FIX-B2] Trigger NO se cancela por bloques intermedios.
+//            Solo se cancela (reemplaza) si llega otro DIVERGENTE_FUERTE.
+//            Antes: cualquier bloque no-FUERTE cancelaba la espera.
+//
+//   [FIX-B3] (incluido en FIX-D5) Contexto congelado en el momento del trigger.
+//
+//   [FIX-B6] Doble suscripción al evento corregida con -= antes de +=.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#region Using declarations
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
+using NinjaTrader.Cbi;
+using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Strategies;
+#endregion
+
+namespace NinjaTrader.NinjaScript.Strategies
+{
+    public class MarkovTradingTerciario : Strategy
+    {
+        // ════════════════════════════════════════════════════════════════════
+        // PARÁMETROS
+        // ════════════════════════════════════════════════════════════════════
+        #region Parametros
+
+        [NinjaScriptProperty]
+        [Display(Name = "Primario nTicks",      GroupName = "1 Bloques", Order = 1)]
+        public int PrimarioNTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Primario Escape",      GroupName = "1 Bloques", Order = 2)]
+        public int PrimarioEscape { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Secundario nTicks",    GroupName = "1 Bloques", Order = 3)]
+        public int SecundarioNTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Secundario Escape",    GroupName = "1 Bloques", Order = 4)]
+        public int SecundarioEscape { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Terciario nTicks",     GroupName = "1 Bloques", Order = 5)]
+        public int TerciarioNTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Terciario Escape",     GroupName = "1 Bloques", Order = 6)]
+        public int TerciarioEscape { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Umbral Fuerte Positivo",  GroupName = "2 Umbrales FN", Order = 1)]
+        public double UmbralFuertePositivo { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Umbral Fuerte Negativo",  GroupName = "2 Umbrales FN", Order = 2)]
+        public double UmbralFuerteNegativo { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Umbral Divergente (positivo, ej: 53.8)", GroupName = "2 Umbrales FN", Order = 3)]
+        public double UmbralDivergente { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Max Contratos (1 o 2)",             GroupName = "3 Riesgo", Order = 1)]
+        public int MaxContratos { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Stop Loss Inicial (pts)",           GroupName = "3 Riesgo", Order = 2)]
+        public int StopLossInicialPts { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Take Profit 1 (pts) - Contrato 1", GroupName = "3 Riesgo", Order = 3)]
+        public int TakeProfit1Pts { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Take Profit 2 (pts) - Contrato 2", GroupName = "3 Riesgo", Order = 4)]
+        public int TakeProfit2Pts { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Breakeven Ticks (sobre entrada)",   GroupName = "3 Riesgo", Order = 5)]
+        public int BreakevenTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Hora Inicio HH", GroupName = "4 Horario", Order = 1)]
+        public int HoraInicioHH { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Hora Inicio MM", GroupName = "4 Horario", Order = 2)]
+        public int HoraInicioMM { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Hora Fin HH",    GroupName = "4 Horario", Order = 3)]
+        public int HoraFinHH { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Hora Fin MM",    GroupName = "4 Horario", Order = 4)]
+        public int HoraFinMM { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Bloques en Log",   GroupName = "5 Debug", Order = 1)]
+        public bool MostrarBloques { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Mostrar Diagnóstico",      GroupName = "5 Debug", Order = 2)]
+        public bool MostrarDiagnostico { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Ruta JSON Dir",            GroupName = "5 Debug", Order = 3)]
+        public string RutaJsonDir { get; set; }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // GEOMETRÍA DE BLOQUES (calculada en DataLoaded)
+        // ════════════════════════════════════════════════════════════════════
+        #region Geometria
+
+        private double _alturaPrim, _alturaSecundario, _alturaTerciario;
+        private double _escapePrim, _escapeSecundario, _escapeTerciario;
+
+        // Precio base de cada nivel (igual que precioBase* en el exportador)
+        private double _basePrim, _baseSec, _baseTerc;
+        private bool   _inicializado = false;
+
+        // Dirección de escape del bloque activo en cada nivel
+        private string _dirPrimActivo = "ALCISTA";
+        private string _dirSecActivo  = "ALCISTA";
+        private string _dirTercActivo = "ALCISTA";
+
+        // [FIX-D6] Flag para coordinar cascada: cuando escapa un nivel superior
+        //          el terciario NO debe cerrarse por su propia geometría en esa barra.
+        private bool _escapeSuperiorEnCurso = false;
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // ACUMULADORES DEL TERCIARIO (velas individuales)
+        // ════════════════════════════════════════════════════════════════════
+        #region Acumuladores Terciario
+
+        private double _sumAlcTerc = 0, _sumBajTerc = 0;
+        private int    _cntAlcTerc = 0, _cntBajTerc = 0;
+        private double _fbBrutoTerc = 0;
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // ACUMULADORES DEL SECUNDARIO (terciarios hijos)
+        // ════════════════════════════════════════════════════════════════════
+        #region Acumuladores Secundario
+
+        private double _sumAlcSec = 0, _sumBajSec = 0;
+        private int    _cntAlcSec = 0, _cntBajSec = 0;
+
+        // Etiqueta calculada del secundario activo (recalculada tras cada terciario)
+        private string _etiqSecActivo = "";
+        private string _etiqPrimActivo = "";
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // ACUMULADORES DEL PRIMARIO (secundarios hijos)
+        // ════════════════════════════════════════════════════════════════════
+        #region Acumuladores Primario
+
+        private double _sumAlcPrim = 0, _sumBajPrim = 0;
+        private int    _cntAlcPrim = 0, _cntBajPrim = 0;
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // MÁQUINA DE ESTADOS: TRIGGER → CONFIRM → ENTRADA
+        // ════════════════════════════════════════════════════════════════════
+        #region Estado Señal
+
+        private string _etiqTrigger            = "";
+        private double _fnDisplayTrigger        = 0;
+        private bool   _esperandoConfirm        = false;
+
+        // [FIX-D5] Contexto congelado en el momento del trigger
+        private string _etiqPrimEnTrigger       = "";
+        private string _etiqSecEnTrigger        = "";
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // UMBRALES (leídos de metadata.json)
+        // ════════════════════════════════════════════════════════════════════
+        #region Umbrales
+
+        // [FIX-D4] umbralDivAbs se almacena como POSITIVO (ej: 53.8)
+        //          y se usa con Math.Abs(fnDisplay) en la clasificación.
+        private double _umbralFuerteAbs = 115.0;   // fallback
+        private double _umbralDivAbs    = 53.8;    // fallback (positivo)
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // REGLAS MARKOV
+        // ════════════════════════════════════════════════════════════════════
+        #region Reglas
+
+        private List<ReglaMarkov> _reglas = null;
+
+        private class ReglaMarkov
+        {
+            public string       Id                   { get; set; }
+            public string       Nombre               { get; set; }
+            public string       Accion               { get; set; }
+            public List<string> PrimarioCoherencia   { get; set; }
+            public List<string> SecundarioCoherencia { get; set; }
+            public List<string> TriggerCoherencia    { get; set; }
+            public List<string> ConfirmCoherencia    { get; set; }
+            public double       FnTriggerMinAbs      { get; set; }
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // GESTIÓN DE RIESGO
+        // ════════════════════════════════════════════════════════════════════
+        #region Riesgo
+
+        private enum EstadoOp { Flat, Abierta, BreakevenActivo }
+        private EstadoOp _estadoOp      = EstadoOp.Flat;
+        private double   _precioEntrada = 0;
+        private string   _direccionOp   = "";
+
+        private const string NombreLong  = "MarkovLong";
+        private const string NombreShort = "MarkovShort";
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // INICIALIZACIÓN
+        // ════════════════════════════════════════════════════════════════════
+        #region OnStateChange
+
+        protected override void OnStateChange()
+        {
+            if (State == State.SetDefaults)
+            {
+                Description = "Markov Trading Terciario v5.1 — Reversiones Multinivel";
+                Name        = "MarkovTradingTerciario";
+
+                PrimarioNTicks   = 360;
+                PrimarioEscape   = 216;
+                SecundarioNTicks = 120;
+                SecundarioEscape = 72;
+                TerciarioNTicks  = 40;
+                TerciarioEscape  = 24;
+
+                // [FIX-D4] UmbralDivergente como POSITIVO
+                UmbralFuertePositivo =  115;
+                UmbralFuerteNegativo = -115;
+                UmbralDivergente     =   53.8;   // positivo — se compara con Math.Abs
+
+                MaxContratos       = 2;
+                StopLossInicialPts = 10;
+                TakeProfit1Pts     = 10;
+                TakeProfit2Pts     = 20;
+                BreakevenTicks     = 4;
+
+                HoraInicioHH = 9;
+                HoraInicioMM = 30;
+                HoraFinHH    = 16;
+                HoraFinMM    = 0;
+
+                MostrarBloques     = true;
+                MostrarDiagnostico = false;
+                RutaJsonDir        = @"C:\MarkovData";
+
+                Calculate                    = Calculate.OnBarClose;
+                EntriesPerDirection          = 1;
+                EntryHandling                = EntryHandling.AllEntries;
+                IsExitOnSessionCloseStrategy = true;
+                ExitOnSessionCloseSeconds    = 30;
+                StartBehavior                = StartBehavior.WaitUntilFlat;
+                StopTargetHandling           = StopTargetHandling.PerEntryExecution;
+                BarsRequiredToTrade          = 1;
+            }
+            else if (State == State.DataLoaded)
+            {
+                CargarUmbralesDesdeMetadata();
+                CargarReglas();
+            }
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // CARGA DE UMBRALES Y REGLAS
+        // ════════════════════════════════════════════════════════════════════
+        #region Carga
+
+        private void CargarUmbralesDesdeMetadata()
+        {
+            string rutaMeta = Path.Combine(RutaJsonDir, "metadata.json");
+            if (!File.Exists(rutaMeta))
+            {
+                Print("[MARKOV] metadata.json no encontrado — usando fallback: Fuerte="
+                    + _umbralFuerteAbs + " DivAbs=" + _umbralDivAbs);
+                return;
+            }
+            try
+            {
+                string txt   = File.ReadAllText(rutaMeta);
+                int    idx   = txt.IndexOf("\"umbrales_estrategia\"");
+                if (idx < 0) { Print("[MARKOV] umbrales_estrategia no encontrado"); return; }
+
+                int ini   = txt.IndexOf('{', idx);
+                int fin   = txt.IndexOf('}', ini);
+                string bl = txt.Substring(ini, fin - ini + 1);
+
+                double fuerteRaw = LeerDouble(bl, "\"umbral_fuerte\"");
+                double divRaw    = LeerDouble(bl, "\"umbral_divergente\"");   // viene negativo: -53.8
+
+                // [FIX-D4] Guardar siempre como positivos
+                _umbralFuerteAbs = Math.Abs(fuerteRaw);
+                _umbralDivAbs    = Math.Abs(divRaw);
+
+                Print("[MARKOV] Umbrales cargados de metadata.json:");
+                Print("   UmbralFuerteAbs = " + _umbralFuerteAbs);
+                Print("   UmbralDivAbs    = " + _umbralDivAbs);
+            }
+            catch (Exception ex)
+            {
+                Print("[MARKOV] Error leyendo metadata: " + ex.Message + " — usando fallback");
+            }
+        }
+
+        private void CargarReglas()
+        {
+            _reglas = new List<ReglaMarkov>();
+            string ruta = Path.Combine(RutaJsonDir, "nivel_terciario_config.json");
+            if (!File.Exists(ruta)) { Print("[MARKOV] ERROR: no encontrado " + ruta); return; }
+
+            try
+            {
+                string json   = File.ReadAllText(ruta);
+                var    loader = new MarkovConfigLoader();
+                var    dtos   = loader.CargarReglasTerciario(json);
+
+                foreach (var d in dtos)
+                {
+                    _reglas.Add(new ReglaMarkov
+                    {
+                        Id                   = d.Id,
+                        Nombre               = d.Nombre,
+                        Accion               = d.Accion,
+                        PrimarioCoherencia   = d.PrimarioCoherencia,
+                        SecundarioCoherencia = d.SecundarioCoherencia,
+                        TriggerCoherencia    = d.TriggerCoherencia,
+                        ConfirmCoherencia    = d.ConfirmCoherencia,
+                        FnTriggerMinAbs      = d.FnTriggerMinAbs,
+                    });
+                }
+                Print("[MARKOV] Reglas cargadas: " + _reglas.Count);
+                Print("[MARKOV] Lógica: TRIGGER=DIV_FUERTE → CONFIRM=FUERTE → ENTRADA");
+                Print("[MARKOV] SL=" + StopLossInicialPts + "pts  TP1=" + TakeProfit1Pts
+                    + "pts  TP2=" + TakeProfit2Pts + "pts");
+            }
+            catch (Exception ex)
+            {
+                Print("[MARKOV] ERROR cargando reglas: " + ex.Message);
+            }
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // LOOP PRINCIPAL — [FIX-D1] Escape JERÁRQUICO igual que E1
+        // ════════════════════════════════════════════════════════════════════
+        #region OnBarUpdate
+
+        protected override void OnBarUpdate()
+        {
+            if (BarsInProgress != 0) return;
+            if (CurrentBar < 2)      return;
+
+            // Inicializar geometría en la primera barra
+            if (!_inicializado)
+            {
+                _basePrim = _baseSec = _baseTerc = Close[0];
+                _inicializado = true;
+
+                // Calcular alturas y escapes en puntos
+                _alturaPrim      = PrimarioNTicks   * TickSize;
+                _alturaSecundario = SecundarioNTicks * TickSize;
+                _alturaTerciario  = TerciarioNTicks  * TickSize;
+                _escapePrim       = PrimarioEscape   * TickSize;
+                _escapeSecundario = SecundarioEscape * TickSize;
+                _escapeTerciario  = TerciarioEscape  * TickSize;
+
+                Print("[MARKOV] Inicializado @ " + Close[0].ToString("F2"));
+                return;
+            }
+
+            double high = High[0];
+            double low  = Low[0];
+
+            // Acumular vela en el terciario activo
+            bool   esAlc      = Close[0] >= Open[0];
+            double fbVela     = esAlc
+                ?  (high - low) / TickSize
+                : -(high - low) / TickSize;
+            _fbBrutoTerc += fbVela;
+            if (esAlc) { _sumAlcTerc += fbVela; _cntAlcTerc++; }
+            else       { _sumBajTerc += fbVela; _cntBajTerc++; }
+
+            // Calcular zonas de escape para los 3 niveles
+            double supTerc  = _baseTerc + (_alturaTerciario  / 2) + _escapeTerciario;
+            double infTerc  = _baseTerc - (_alturaTerciario  / 2) - _escapeTerciario;
+            double supSec   = _baseSec  + (_alturaSecundario / 2) + _escapeSecundario;
+            double infSec   = _baseSec  - (_alturaSecundario / 2) - _escapeSecundario;
+            double supPrim  = _basePrim + (_alturaPrim       / 2) + _escapePrim;
+            double infPrim  = _basePrim - (_alturaPrim       / 2) - _escapePrim;
+
+            // [FIX-D1] Evaluar en orden jerárquico — solo procesar UN nivel por barra
+            _escapeSuperiorEnCurso = false;
+
+            if (high > supPrim || low < infPrim)
+            {
+                // ── ESCAPE PRIMARIO ──────────────────────────────────────
+                _escapeSuperiorEnCurso = true;
+                string dir = (high > supPrim) ? "ALCISTA" : "BAJISTA";
+
+                // 1. Cerrar terciario (dentro de la cascada)
+                CerrarTerciarioEnCascada(dir);
+
+                // 2. Cerrar secundario
+                CerrarSecundarioEnCascada(dir);
+
+                // 3. Cerrar primario
+                CerrarPrimario(dir);
+
+                // 4. Crear nuevo primario, secundario, terciario
+                CrearNuevoPrimario(dir);
+                CrearNuevoSecundario(dir);
+                CrearNuevoTerciario(dir);
+            }
+            else if (high > supSec || low < infSec)
+            {
+                // ── ESCAPE SECUNDARIO ────────────────────────────────────
+                _escapeSuperiorEnCurso = true;
+                string dir = (high > supSec) ? "ALCISTA" : "BAJISTA";
+
+                // 1. Cerrar terciario (dentro de la cascada)
+                CerrarTerciarioEnCascada(dir);
+
+                // 2. Cerrar secundario
+                CerrarSecundario(dir);
+
+                // 3. Crear nuevo secundario y terciario
+                CrearNuevoSecundario(dir);
+                CrearNuevoTerciario(dir);
+            }
+            else if (high > supTerc || low < infTerc)
+            {
+                // ── ESCAPE TERCIARIO ─────────────────────────────────────
+                string dir = (high > supTerc) ? "ALCISTA" : "BAJISTA";
+                CerrarTerciario(dir);
+                CrearNuevoTerciario(dir);
+            }
+
+            if (MostrarDiagnostico && CurrentBar % 500 == 0)
+                ImprimirDiagnostico();
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // CIERRE DE BLOQUES
+        // ════════════════════════════════════════════════════════════════════
+        #region Cierre
+
+        // Cierre de terciario en escape PROPIO (genera señal)
+        private void CerrarTerciario(string dir)
+        {
+            double fn        = CalcularFN(_cntAlcTerc, _sumAlcTerc, _cntBajTerc, _sumBajTerc);
+            double fnDisplay = Math.Round(fn * 10, 2);
+
+            // [FIX-D4] Clasificación con zona COHERENTE correcta
+            string etiq = DeterminarEtiqueta(dir, fnDisplay);
+
+            // Acumular en secundario
+            AcumularEnSecundario(dir, _fbBrutoTerc);
+
+            if (MostrarBloques)
+                Print("🟪 Terc → " + etiq
+                    + " | FN_D: " + fnDisplay.ToString("F1")
+                    + (_esperandoConfirm ? " [ESPERANDO CONFIRM]" : ""));
+
+            // Recalcular etiqueta del secundario activo
+            ActualizarEtiqSecActivo();
+
+            // Evaluar máquina de señal
+            ProcesarEtiquetaTerciario(etiq, fnDisplay);
+
+            ResetAcumuladoresTerc();
+        }
+
+        // Cierre de terciario dentro de una cascada de escape superior
+        // No actualiza la señal porque el contexto se va a resetear
+        private void CerrarTerciarioEnCascada(string dir)
+        {
+            double fn        = CalcularFN(_cntAlcTerc, _sumAlcTerc, _cntBajTerc, _sumBajTerc);
+            double fnDisplay = Math.Round(fn * 10, 2);
+            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
+
+            // Acumular en secundario
+            AcumularEnSecundario(dir, _fbBrutoTerc);
+
+            if (MostrarBloques)
+                Print("🟪 Terc (cascada) → " + etiq + " | FN_D: " + fnDisplay.ToString("F1"));
+
+            // En cascada: cancelar cualquier trigger pendiente (contexto cambia)
+            if (_esperandoConfirm)
+            {
+                _esperandoConfirm = false;
+                _etiqTrigger      = "";
+                _fnDisplayTrigger = 0;
+                if (MostrarBloques)
+                    Print("   ⚠️ Trigger cancelado por escape superior");
+            }
+
+            ResetAcumuladoresTerc();
+        }
+
+        private void CerrarSecundario(string dir)
+        {
+            double fn        = CalcularFN(_cntAlcSec, _sumAlcSec, _cntBajSec, _sumBajSec);
+            double fnDisplay = Math.Round(fn * 10, 2);
+            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
+
+            // Acumular en primario con el FB del secundario
+            double fbSec = _sumAlcSec + _sumBajSec;
+            AcumularEnPrimario(dir, fbSec);
+            ActualizarEtiqPrimActivo();
+
+            if (MostrarBloques)
+                Print("🟦 Sec → " + etiq + " | FN_D: " + fnDisplay.ToString("F1"));
+
+            ResetAcumuladoresSec();
+            _etiqSecActivo = "";
+        }
+
+        // Alias para legibilidad en cascada de primario
+        private void CerrarSecundarioEnCascada(string dir) { CerrarSecundario(dir); }
+
+        private void CerrarPrimario(string dir)
+        {
+            double fn        = CalcularFN(_cntAlcPrim, _sumAlcPrim, _cntBajPrim, _sumBajPrim);
+            double fnDisplay = Math.Round(fn * 10, 2);
+            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
+
+            if (MostrarBloques)
+                Print("🟥 Prim → " + etiq + " | FN_D: " + fnDisplay.ToString("F1"));
+
+            ResetAcumuladoresPrim();
+            _etiqPrimActivo = "";
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // CREACIÓN DE BLOQUES
+        // ════════════════════════════════════════════════════════════════════
+        #region Creacion
+
+        private void CrearNuevoTerciario(string dir)
+        {
+            _baseTerc    = (dir == "ALCISTA")
+                ? _baseTerc + _alturaTerciario
+                : _baseTerc - _alturaTerciario;
+            _dirTercActivo = dir;
+            ResetAcumuladoresTerc();
+        }
+
+        private void CrearNuevoSecundario(string dir)
+        {
+            _baseSec     = (dir == "ALCISTA")
+                ? _baseSec + _alturaSecundario
+                : _baseSec - _alturaSecundario;
+            _dirSecActivo = dir;
+            ResetAcumuladoresSec();
+            _etiqSecActivo = "";
+        }
+
+        private void CrearNuevoPrimario(string dir)
+        {
+            _basePrim    = (dir == "ALCISTA")
+                ? _basePrim + _alturaPrim
+                : _basePrim - _alturaPrim;
+            _dirPrimActivo = dir;
+            ResetAcumuladoresPrim();
+            _etiqPrimActivo = "";
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // ACUMULACIÓN EN NIVELES SUPERIORES
+        // ════════════════════════════════════════════════════════════════════
+        #region Acumulacion
+
+        private void AcumularEnSecundario(string dirHijo, double fbHijo)
+        {
+            if (dirHijo == "ALCISTA") { _sumAlcSec += fbHijo; _cntAlcSec++; }
+            else                      { _sumBajSec += fbHijo; _cntBajSec++; }
+        }
+
+        private void AcumularEnPrimario(string dirHijo, double fbHijo)
+        {
+            if (dirHijo == "ALCISTA") { _sumAlcPrim += fbHijo; _cntAlcPrim++; }
+            else                      { _sumBajPrim += fbHijo; _cntBajPrim++; }
+        }
+
+        private void ActualizarEtiqSecActivo()
+        {
+            double fn        = CalcularFN(_cntAlcSec, _sumAlcSec, _cntBajSec, _sumBajSec);
+            double fnDisplay = Math.Round(fn * 10, 2);
+            _etiqSecActivo   = DeterminarEtiqueta(_dirSecActivo, fnDisplay);
+        }
+
+        private void ActualizarEtiqPrimActivo()
+        {
+            double fn        = CalcularFN(_cntAlcPrim, _sumAlcPrim, _cntBajPrim, _sumBajPrim);
+            double fnDisplay = Math.Round(fn * 10, 2);
+            _etiqPrimActivo  = DeterminarEtiqueta(_dirPrimActivo, fnDisplay);
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // MÁQUINA DE SEÑAL: TRIGGER → CONFIRM → ENTRADA
+        // ════════════════════════════════════════════════════════════════════
+        #region Señal
+
+        private void ProcesarEtiquetaTerciario(string etiq, double fnDisplay)
+        {
+            if (!_esperandoConfirm)
+            {
+                // ── PASO 1: ¿Es un TRIGGER? ──────────────────────────────
+                if (etiq.Contains("DIVERGENTE_FUERTE"))
+                {
+                    _etiqTrigger      = etiq;
+                    _fnDisplayTrigger = fnDisplay;
+                    _esperandoConfirm = true;
+
+                    // [FIX-D5] Congelar contexto activo en el momento del trigger
+                    _etiqPrimEnTrigger = _etiqPrimActivo;
+                    _etiqSecEnTrigger  = _etiqSecActivo;
+
+                    if (MostrarBloques)
+                        Print("   🟠 TRIGGER: " + _etiqTrigger
+                            + " FN_D=" + fnDisplay.ToString("F1")
+                            + " | Prim=" + _etiqPrimEnTrigger
+                            + " Sec="   + _etiqSecEnTrigger);
+                }
+                return;
+            }
+
+            // ── PASO 2: Esperando CONFIRM ─────────────────────────────────
+            bool esConfirmValido = etiq.EndsWith("FUERTE") && !etiq.Contains("DIVERGENTE");
+
+            if (esConfirmValido)
+            {
+                // CONFIRM recibido → evaluar señal
+                if (MostrarBloques)
+                    Print("   🟢 CONFIRM: " + etiq + " → Evaluando señal...");
+
+                EvaluarSenales(etiq);
+
+                // Limpiar estado
+                _esperandoConfirm = false;
+                _etiqTrigger      = "";
+                _fnDisplayTrigger = 0;
+            }
+            else if (etiq.Contains("DIVERGENTE_FUERTE"))
+            {
+                // [FIX-B2] Nuevo DIVERGENTE_FUERTE reemplaza al anterior trigger
+                _etiqTrigger      = etiq;
+                _fnDisplayTrigger = fnDisplay;
+
+                // [FIX-D5] Actualizar contexto congelado
+                _etiqPrimEnTrigger = _etiqPrimActivo;
+                _etiqSecEnTrigger  = _etiqSecActivo;
+
+                if (MostrarBloques)
+                    Print("   🟠 TRIGGER reemplazado: " + _etiqTrigger
+                        + " | Prim=" + _etiqPrimEnTrigger
+                        + " Sec="   + _etiqSecEnTrigger);
+            }
+            // [FIX-B2] Cualquier otra etiqueta (COHERENTE, DEBIL) → NO cancelar.
+            //          Seguir esperando el confirm.
+            else
+            {
+                if (MostrarBloques)
+                    Print("   ⏳ Intermedio ignorado (" + etiq + ") — siguiendo espera confirm");
+            }
+        }
+
+        private void EvaluarSenales(string etiqConfirm)
+        {
+            if (_reglas == null || _reglas.Count == 0)     return;
+            if (string.IsNullOrEmpty(_etiqPrimEnTrigger))  return;
+            if (string.IsNullOrEmpty(_etiqSecEnTrigger))   return;
+            if (string.IsNullOrEmpty(_etiqTrigger))        return;
+            if (!DentroDeHorario())                        return;
+            if (Position.MarketPosition != MarketPosition.Flat) return;
+
+            foreach (var regla in _reglas)
+            {
+                // [FIX-D5] Usar contexto congelado al momento del trigger
+                if (!ListaContiene(regla.PrimarioCoherencia,   _etiqPrimEnTrigger)) continue;
+                if (!ListaContiene(regla.SecundarioCoherencia, _etiqSecEnTrigger))  continue;
+                if (!ListaContiene(regla.TriggerCoherencia,    _etiqTrigger))       continue;
+                if (!ListaContiene(regla.ConfirmCoherencia,    etiqConfirm))        continue;
+
+                // Filtro FN del trigger
+                if (regla.FnTriggerMinAbs > 0 &&
+                    Math.Abs(_fnDisplayTrigger) < regla.FnTriggerMinAbs)
+                {
+                    if (MostrarBloques)
+                        Print("   ⚠️ Filtro FN rechazado: |"
+                            + _fnDisplayTrigger.ToString("F1")
+                            + "| < " + regla.FnTriggerMinAbs.ToString("F1"));
+                    continue;
+                }
+
+                EjecutarEntrada(regla, etiqConfirm);
+                break;
+            }
+        }
+
+        private void EjecutarEntrada(ReglaMarkov regla, string etiqConfirm)
+        {
+            Print("════════════════════════════════════════════════════════");
+            Print("📈 " + regla.Accion + " — " + regla.Nombre);
+            Print("   Prim:    " + _etiqPrimEnTrigger);
+            Print("   Sec:     " + _etiqSecEnTrigger);
+            Print("   Trigger: " + _etiqTrigger + " (FN_D=" + _fnDisplayTrigger.ToString("F1") + ")");
+            Print("   Confirm: " + etiqConfirm);
+            Print("   Precio:  " + Close[0].ToString("F2"));
+            Print("════════════════════════════════════════════════════════");
+
+            if (regla.Accion == "COMPRAR")
+                EnterLong(MaxContratos, NombreLong);
+            else
+                EnterShort(MaxContratos, NombreShort);
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // CÁLCULOS FN Y CLASIFICACIÓN
+        // ════════════════════════════════════════════════════════════════════
+        #region Calculos
+
+        private double CalcularFN(int cA, double sA, int cB, double sB)
+        {
+            double compAlc = (cA > 0) ? sA / cA : 0;
+            double compBaj = (cB > 0) ? sB / cB : 0;
+            return compAlc + compBaj;
+        }
+
+        // [FIX-D4] Clasificación idéntica al exportador E1:
+        //   ALCISTA: > umbFuerte → FUERTE
+        //            > 0         → COHERENTE
+        //            > -umbDiv   → DIV_DEBIL
+        //            else        → DIV_FUERTE
+        //   BAJISTA: < -umbFuerte → FUERTE
+        //            < 0          → COHERENTE
+        //            < umbDiv     → DIV_DEBIL   (equiv. < -(-umbDiv))
+        //            else         → DIV_FUERTE
+        private string DeterminarEtiqueta(string dir, double fnDisplay)
+        {
+            double umbFuerte = _umbralFuerteAbs;   // positivo, ej: 115
+            double umbDiv    = _umbralDivAbs;       // positivo, ej: 53.8
+
+            if (dir == "ALCISTA")
+            {
+                if (fnDisplay >  umbFuerte) return "ALCISTA_FUERTE";
+                if (fnDisplay >  0)         return "ALCISTA_COHERENTE";
+                if (fnDisplay > -umbDiv)    return "ALCISTA_DIVERGENTE_DEBIL";
+                return                             "ALCISTA_DIVERGENTE_FUERTE";
+            }
+            else
+            {
+                if (fnDisplay < -umbFuerte) return "BAJISTA_FUERTE";
+                if (fnDisplay <  0)         return "BAJISTA_COHERENTE";
+                if (fnDisplay <  umbDiv)    return "BAJISTA_DIVERGENTE_DEBIL";
+                return                             "BAJISTA_DIVERGENTE_FUERTE";
+            }
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // RESET DE ACUMULADORES
+        // ════════════════════════════════════════════════════════════════════
+        #region Reset
+
+        private void ResetAcumuladoresTerc()
+        {
+            _sumAlcTerc = 0; _sumBajTerc = 0;
+            _cntAlcTerc = 0; _cntBajTerc = 0;
+            _fbBrutoTerc = 0;
+        }
+
+        private void ResetAcumuladoresSec()
+        {
+            _sumAlcSec = 0; _sumBajSec = 0;
+            _cntAlcSec = 0; _cntBajSec = 0;
+        }
+
+        private void ResetAcumuladoresPrim()
+        {
+            _sumAlcPrim = 0; _sumBajPrim = 0;
+            _cntAlcPrim = 0; _cntBajPrim = 0;
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // GESTIÓN DE RIESGO
+        // ════════════════════════════════════════════════════════════════════
+        #region Riesgo
+
+        protected override void OnExecutionUpdate(Execution execution, string executionId,
+            double price, int quantity, MarketPosition marketPosition,
+            string orderId, DateTime time)
+        {
+            if (execution.Order == null) return;
+            string     nombre = execution.Order.Name;
+            OrderState st     = execution.Order.OrderState;
+
+            if ((nombre == NombreLong || nombre == NombreShort) &&
+                (st == OrderState.Filled || st == OrderState.PartFilled))
+            {
+                _precioEntrada = price;
+                _direccionOp   = (nombre == NombreLong) ? "LONG" : "SHORT";
+                _estadoOp      = EstadoOp.Abierta;
+                Print("✅ Entrada @ " + price.ToString("F2")
+                    + " | Dir: " + _direccionOp
+                    + " | Contratos: " + MaxContratos);
+                ColocarOrdenesFase1();
+            }
+        }
+
+        protected override void OnPositionUpdate(Position position, double averagePrice,
+            int quantity, MarketPosition marketPosition)
+        {
+            if (_estadoOp == EstadoOp.Abierta &&
+                MaxContratos == 2 &&
+                position.MarketPosition != MarketPosition.Flat &&
+                position.Quantity == 1)
+            {
+                Print("🎯 TP1 alcanzado — Activando Breakeven...");
+                ActivarBreakeven();
+            }
+
+            if (position.MarketPosition == MarketPosition.Flat && _estadoOp != EstadoOp.Flat)
+            {
+                Print("🏁 Posición cerrada.");
+                _estadoOp = EstadoOp.Flat;
+            }
+        }
+
+        private void ColocarOrdenesFase1()
+        {
+            int slTicks  = StopLossInicialPts * 4;
+            int tp1Ticks = TakeProfit1Pts     * 4;
+            int tp2Ticks = TakeProfit2Pts     * 4;
+
+            string nombre = (_direccionOp == "LONG") ? NombreLong : NombreShort;
+
+            SetStopLoss(nombre, CalculationMode.Ticks, slTicks, false);
+            SetProfitTarget(nombre, CalculationMode.Ticks,
+                MaxContratos == 2 ? tp1Ticks : tp2Ticks);
+
+            double slRef  = (_direccionOp == "LONG")
+                ? _precioEntrada - StopLossInicialPts : _precioEntrada + StopLossInicialPts;
+            double tp1Ref = (_direccionOp == "LONG")
+                ? _precioEntrada + TakeProfit1Pts     : _precioEntrada - TakeProfit1Pts;
+            double tp2Ref = (_direccionOp == "LONG")
+                ? _precioEntrada + TakeProfit2Pts     : _precioEntrada - TakeProfit2Pts;
+
+            Print("   SL @ " + slRef.ToString("F2")
+                + " | TP1 @ " + tp1Ref.ToString("F2")
+                + " | TP2 @ " + tp2Ref.ToString("F2"));
+        }
+
+        private void ActivarBreakeven()
+        {
+            _estadoOp = EstadoOp.BreakevenActivo;
+            string nombre = (_direccionOp == "LONG") ? NombreLong : NombreShort;
+
+            double bePrecio = (_direccionOp == "LONG")
+                ? _precioEntrada + (BreakevenTicks * TickSize)
+                : _precioEntrada - (BreakevenTicks * TickSize);
+
+            SetStopLoss(nombre, CalculationMode.Price, bePrecio, false);
+            SetProfitTarget(nombre, CalculationMode.Ticks, TakeProfit2Pts * 4);
+
+            double tp2Ref = (_direccionOp == "LONG")
+                ? _precioEntrada + TakeProfit2Pts
+                : _precioEntrada - TakeProfit2Pts;
+
+            Print("   🔒 BE @ " + bePrecio.ToString("F2")
+                + " | TP2 @ " + tp2Ref.ToString("F2"));
+        }
+
+        #endregion
+
+        // ════════════════════════════════════════════════════════════════════
+        // UTILIDADES
+        // ════════════════════════════════════════════════════════════════════
+        #region Utilidades
+
+        private bool DentroDeHorario()
+        {
+            var h   = Time[0].TimeOfDay;
+            var ini = new TimeSpan(HoraInicioHH, HoraInicioMM, 0);
+            var fin = new TimeSpan(HoraFinHH,    HoraFinMM,    0);
+            return h >= ini && h <= fin;
+        }
+
+        private bool ListaContiene(List<string> lista, string valor)
+        {
+            if (lista == null || lista.Count == 0) return true;
+            return lista.Contains(valor);
+        }
+
+        private double LeerDouble(string json, string clave)
+        {
+            int i = json.IndexOf(clave); if (i < 0) return 0;
+            int c = json.IndexOf(':', i); if (c < 0) return 0;
+            int s = c + 1;
+            while (s < json.Length && (json[s] == ' ' || json[s] == '\n')) s++;
+            int e = s;
+            while (e < json.Length && (char.IsDigit(json[e]) || json[e] == '.' || json[e] == '-')) e++;
+            double r;
+            return double.TryParse(json.Substring(s, e - s),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out r) ? r : 0;
+        }
+
+        private void ImprimirDiagnostico()
+        {
+            Print("DIAG Barra " + CurrentBar
+                + " | P:"  + _etiqPrimActivo
+                + " | S:"  + _etiqSecActivo
+                + " | Tr:" + _etiqTrigger
+                + " | Esp:" + _esperandoConfirm
+                + " | Op:" + _estadoOp);
+        }
+
+        #endregion
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // DTO
+    // ════════════════════════════════════════════════════════════════════════
+    public class ReglaMarkovDTO
+    {
+        public string       Id                   { get; set; }
+        public string       Nombre               { get; set; }
+        public string       Accion               { get; set; }
+        public List<string> PrimarioCoherencia   { get; set; } = new List<string>();
+        public List<string> SecundarioCoherencia { get; set; } = new List<string>();
+        public List<string> TriggerCoherencia    { get; set; } = new List<string>();
+        public List<string> ConfirmCoherencia    { get; set; } = new List<string>();
+        public double       FnTriggerMinAbs      { get; set; } = 0;
+        public double       WinRate              { get; set; }
+        public int          TotalSenales         { get; set; }
+        public bool         Activa               { get; set; } = true;
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PARSER JSON MANUAL (sin Newtonsoft, compatible NT8)
+    // ════════════════════════════════════════════════════════════════════════
+    public class MarkovConfigLoader
+    {
+        public List<ReglaMarkovDTO> CargarReglasTerciario(string jsonText)
+        {
+            var resultado = new List<ReglaMarkovDTO>();
+            int idxReglas = jsonText.IndexOf("\"reglas\"");
+            if (idxReglas < 0) return resultado;
+
+            int idxArr = jsonText.IndexOf('[', idxReglas);
+            if (idxArr < 0) return resultado;
+
+            int pos = idxArr + 1;
+            while (pos < jsonText.Length)
+            {
+                int objIni = jsonText.IndexOf('{', pos);
+                if (objIni < 0) break;
+
+                int objFin = CierreObjeto(jsonText, objIni);
+                if (objFin < 0) break;
+
+                string obj = jsonText.Substring(objIni, objFin - objIni + 1);
+                var r = ParsearRegla(obj);
+                if (r != null) resultado.Add(r);
+
+                pos = objFin + 1;
+                int nB = jsonText.IndexOf('{', pos);
+                int nK = jsonText.IndexOf(']', pos);
+                if (nK >= 0 && (nB < 0 || nK < nB)) break;
+            }
+            return resultado;
+        }
+
+        private ReglaMarkovDTO ParsearRegla(string obj)
+        {
+            try
+            {
+                var r    = new ReglaMarkovDTO();
+                r.Id     = Str(obj, "\"id\"");
+                r.Nombre = Str(obj, "\"nombre\"");
+
+                // Accion desde logica_entrada o parametros
+                int ilg = obj.IndexOf("\"logica_entrada\"");
+                if (ilg >= 0)
+                {
+                    int ls = obj.IndexOf('{', ilg);
+                    int le = CierreObjeto(obj, ls);
+                    r.Accion = Str(obj.Substring(ls, le - ls + 1), "\"accion\"");
+                }
+                if (string.IsNullOrEmpty(r.Accion))
+                {
+                    int ip = obj.IndexOf("\"parametros\"");
+                    if (ip >= 0)
+                    {
+                        int ps = obj.IndexOf('{', ip);
+                        int pe = CierreObjeto(obj, ps);
+                        r.Accion = Str(obj.Substring(ps, pe - ps + 1), "\"accion\"");
+                    }
+                }
+
+                // Condiciones
+                int ic = obj.IndexOf("\"condiciones\"");
+                if (ic >= 0)
+                {
+                    int cs = obj.IndexOf('{', ic);
+                    int ce = CierreObjeto(obj, cs);
+                    string co = obj.Substring(cs, ce - cs + 1);
+
+                    r.PrimarioCoherencia   = Lista(co, "\"primario_coherencia\"");
+                    r.SecundarioCoherencia = Lista(co, "\"secundario_coherencia\"");
+                    r.TriggerCoherencia    = Lista(co, "\"trigger_coherencia\"");
+                    r.ConfirmCoherencia    = Lista(co, "\"confirm_coherencia\"");
+                    r.FnTriggerMinAbs      = Dbl(co,   "\"fn_trigger_min_abs\"");
+                }
+
+                // Estadísticas
+                int ie = obj.IndexOf("\"estadisticas\"");
+                if (ie >= 0)
+                {
+                    int es = obj.IndexOf('{', ie);
+                    int ee = CierreObjeto(obj, es);
+                    string eo = obj.Substring(es, ee - es + 1);
+                    r.WinRate      = Dbl(eo, "\"win_rate\"");
+                    r.TotalSenales = (int)Dbl(eo, "\"total_observaciones\"");
+                }
+
+                r.Activa = Bool(obj, "\"activa\"");
+                if (string.IsNullOrEmpty(r.Accion) || !r.Activa) return null;
+                return r;
+            }
+            catch { return null; }
+        }
+
+        private int CierreObjeto(string t, int ini)
+        {
+            int d = 0;
+            for (int i = ini; i < t.Length; i++)
+            {
+                if      (t[i] == '{') d++;
+                else if (t[i] == '}') { d--; if (d == 0) return i; }
+            }
+            return -1;
+        }
+
+        private string Str(string j, string k)
+        {
+            int i = j.IndexOf(k); if (i < 0) return "";
+            int c = j.IndexOf(':', i); if (c < 0) return "";
+            int q1 = j.IndexOf('"', c + 1); if (q1 < 0) return "";
+            int q2 = j.IndexOf('"', q1 + 1); if (q2 < 0) return "";
+            return j.Substring(q1 + 1, q2 - q1 - 1);
+        }
+
+        private List<string> Lista(string j, string k)
+        {
+            var l  = new List<string>();
+            int i  = j.IndexOf(k); if (i < 0) return l;
+            int a1 = j.IndexOf('[', i);
+            int a2 = j.IndexOf(']', a1);
+            if (a1 < 0 || a2 < 0) return l;
+            string c = j.Substring(a1 + 1, a2 - a1 - 1).Trim();
+            if (c == "null" || c == "") return l;
+            int p = 0;
+            while (p < c.Length)
+            {
+                int q1 = c.IndexOf('"', p); if (q1 < 0) break;
+                int q2 = c.IndexOf('"', q1 + 1); if (q2 < 0) break;
+                l.Add(c.Substring(q1 + 1, q2 - q1 - 1));
+                p = q2 + 1;
+            }
+            return l;
+        }
+
+        private double Dbl(string j, string k)
+        {
+            int i = j.IndexOf(k); if (i < 0) return 0;
+            int c = j.IndexOf(':', i); if (c < 0) return 0;
+            int s = c + 1;
+            while (s < j.Length && " \n\r".IndexOf(j[s]) >= 0) s++;
+            int e = s;
+            while (e < j.Length && (char.IsDigit(j[e]) || j[e] == '.' || j[e] == '-')) e++;
+            double r;
+            return double.TryParse(j.Substring(s, e - s),
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out r) ? r : 0;
+        }
+
+        private bool Bool(string j, string k)
+        {
+            int i = j.IndexOf(k); if (i < 0) return true;
+            int c = j.IndexOf(':', i); if (c < 0) return true;
+            int s = c + 1;
+            while (s < j.Length && j[s] == ' ') s++;
+            return j.Substring(s, Math.Min(4, j.Length - s)).ToLower().StartsWith("true");
+        }
+    }
+}
