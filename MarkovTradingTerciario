@@ -1,36 +1,29 @@
-// MarkovTradingTerciario.cs - v5.1
+// MarkovTradingTerciario.cs - v5.2
 // ═══════════════════════════════════════════════════════════════════════════
-// CORRECCIONES v5.1 (sobre v5.0):
+// CORRECCIONES v5.2 (sobre v5.1):
 //
-//   [FIX-D1] Lógica de escape JERÁRQUICA — igual que MultiBricksDataExporterNeta.
-//            Una sola barra procesa UN solo nivel (el de mayor jerarquía).
-//            Antes: los 3 niveles se evaluaban siempre de forma independiente.
+//   [FIX-U1] CRÍTICO: Umbrales INDEPENDIENTES por nivel (Terc / Sec / Prim).
+//            v5.1 usaba _umbralFuerteAbs=115 para clasificar los 3 niveles,
+//            pero Sec y Prim tienen escalas distintas (x4 y x10 mayores).
+//            Ahora se leen 6 valores desde "umbrales_por_nivel" en metadata.json:
+//              terciario.umbral_fuerte / terciario.umbral_divergente
+//              secundario.umbral_fuerte / secundario.umbral_divergente
+//              primario.umbral_fuerte   / primario.umbral_divergente
+//            DeterminarEtiqueta() recibe el nivel como parámetro y aplica
+//            el umbral correcto. Esto garantiza que _etiqSecActivo y
+//            _etiqPrimActivo coincidan con las etiquetas vistas por el trainer.
 //
-//   [FIX-D4] Clasificación de coherencia CORREGIDA:
-//            - Añadida zona COHERENTE (fnDisplay > 0) que faltaba en E2.
-//            - Umbral divergente pasado como POSITIVO (53.8) y comparado
-//              con Math.Abs, igual que el exportador usa -UmbralDivergente.
-//            - Antes: un bloque ALCISTA con fnDisplay=50 se clasificaba
-//              como DIV_DEBIL; ahora se clasifica correctamente como COHERENTE.
+//   [FIX-U2] LEVE: fnDisplay=0 en BAJISTA clasificaba como DIV_DEBIL.
+//            Idéntico al BUG-E1-01 corregido en el exportador.
+//            Fix: cambiar if (fnDisplay < 0) por if (fnDisplay <= 0).
 //
-//   [FIX-D5] Contexto primario/secundario ACTIVO en el momento del trigger.
-//            Al detectar un trigger se congela etiqPrimarioEnTrigger y
-//            etiqSecundarioEnTrigger (el bloque que CONTIENE al terciario),
-//            igual que el exportador usa idSecundarioActivo / idPrimarioActivo.
-//            Antes: se usaba el último cerrado, que podía ser obsoleto.
-//
+// CORRECCIONES v5.1 (mantenidas):
+//   [FIX-D1] Escape jerárquico — un solo nivel por barra.
+//   [FIX-D4] Zona COHERENTE en clasificación (fnDisplay > 0 Alcista).
+//   [FIX-D5] Contexto Prim/Sec congelado al momento del trigger.
 //   [FIX-D6] Cascada coordinada en escapes superiores.
-//            Cuando el secundario o primario escapan, el terciario se cierra
-//            como parte de la cascada, sin generar un cierre independiente
-//            previo. Implementado con flag _escapeSuperiorEnCurso.
-//
-//   [FIX-B2] Trigger NO se cancela por bloques intermedios.
-//            Solo se cancela (reemplaza) si llega otro DIVERGENTE_FUERTE.
-//            Antes: cualquier bloque no-FUERTE cancelaba la espera.
-//
-//   [FIX-B3] (incluido en FIX-D5) Contexto congelado en el momento del trigger.
-//
-//   [FIX-B6] Doble suscripción al evento corregida con -= antes de +=.
+//   [FIX-B2] Trigger no se cancela por bloques intermedios.
+//   [FIX-B6] Doble suscripción corregida.
 // ═══════════════════════════════════════════════════════════════════════════
 
 #region Using declarations
@@ -77,17 +70,30 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Display(Name = "Terciario Escape",     GroupName = "1 Bloques", Order = 6)]
         public int TerciarioEscape { get; set; }
 
+        // [FIX-U1] Los umbrales de UI son fallback; los valores reales vienen del JSON.
         [NinjaScriptProperty]
-        [Display(Name = "Umbral Fuerte Positivo",  GroupName = "2 Umbrales FN", Order = 1)]
-        public double UmbralFuertePositivo { get; set; }
+        [Display(Name = "Fallback: Umbral Fuerte Terc",   GroupName = "2 Umbrales FN (fallback)", Order = 1)]
+        public double UmbralFuerteTercFallback { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Umbral Fuerte Negativo",  GroupName = "2 Umbrales FN", Order = 2)]
-        public double UmbralFuerteNegativo { get; set; }
+        [Display(Name = "Fallback: Umbral Fuerte Sec",    GroupName = "2 Umbrales FN (fallback)", Order = 2)]
+        public double UmbralFuerteSecFallback { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Umbral Divergente (positivo, ej: 53.8)", GroupName = "2 Umbrales FN", Order = 3)]
-        public double UmbralDivergente { get; set; }
+        [Display(Name = "Fallback: Umbral Fuerte Prim",   GroupName = "2 Umbrales FN (fallback)", Order = 3)]
+        public double UmbralFuertePrimFallback { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Fallback: Umbral Div Terc (pos)", GroupName = "2 Umbrales FN (fallback)", Order = 4)]
+        public double UmbralDivTercFallback { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Fallback: Umbral Div Sec (pos)",  GroupName = "2 Umbrales FN (fallback)", Order = 5)]
+        public double UmbralDivSecFallback { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Fallback: Umbral Div Prim (pos)", GroupName = "2 Umbrales FN (fallback)", Order = 6)]
+        public double UmbralDivPrimFallback { get; set; }
 
         [NinjaScriptProperty]
         [Display(Name = "Max Contratos (1 o 2)",             GroupName = "3 Riesgo", Order = 1)]
@@ -140,57 +146,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // GEOMETRÍA DE BLOQUES (calculada en DataLoaded)
+        // GEOMETRÍA DE BLOQUES
         // ════════════════════════════════════════════════════════════════════
         #region Geometria
 
         private double _alturaPrim, _alturaSecundario, _alturaTerciario;
         private double _escapePrim, _escapeSecundario, _escapeTerciario;
 
-        // Precio base de cada nivel (igual que precioBase* en el exportador)
         private double _basePrim, _baseSec, _baseTerc;
         private bool   _inicializado = false;
 
-        // Dirección de escape del bloque activo en cada nivel
         private string _dirPrimActivo = "ALCISTA";
         private string _dirSecActivo  = "ALCISTA";
         private string _dirTercActivo = "ALCISTA";
 
-        // [FIX-D6] Flag para coordinar cascada: cuando escapa un nivel superior
-        //          el terciario NO debe cerrarse por su propia geometría en esa barra.
         private bool _escapeSuperiorEnCurso = false;
 
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // ACUMULADORES DEL TERCIARIO (velas individuales)
+        // ACUMULADORES
         // ════════════════════════════════════════════════════════════════════
-        #region Acumuladores Terciario
+        #region Acumuladores
 
         private double _sumAlcTerc = 0, _sumBajTerc = 0;
         private int    _cntAlcTerc = 0, _cntBajTerc = 0;
         private double _fbBrutoTerc = 0;
 
-        #endregion
-
-        // ════════════════════════════════════════════════════════════════════
-        // ACUMULADORES DEL SECUNDARIO (terciarios hijos)
-        // ════════════════════════════════════════════════════════════════════
-        #region Acumuladores Secundario
-
         private double _sumAlcSec = 0, _sumBajSec = 0;
         private int    _cntAlcSec = 0, _cntBajSec = 0;
-
-        // Etiqueta calculada del secundario activo (recalculada tras cada terciario)
-        private string _etiqSecActivo = "";
+        private string _etiqSecActivo  = "";
         private string _etiqPrimActivo = "";
-
-        #endregion
-
-        // ════════════════════════════════════════════════════════════════════
-        // ACUMULADORES DEL PRIMARIO (secundarios hijos)
-        // ════════════════════════════════════════════════════════════════════
-        #region Acumuladores Primario
 
         private double _sumAlcPrim = 0, _sumBajPrim = 0;
         private int    _cntAlcPrim = 0, _cntBajPrim = 0;
@@ -198,29 +184,33 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // MÁQUINA DE ESTADOS: TRIGGER → CONFIRM → ENTRADA
+        // MÁQUINA DE ESTADOS
         // ════════════════════════════════════════════════════════════════════
         #region Estado Señal
 
         private string _etiqTrigger            = "";
         private double _fnDisplayTrigger        = 0;
         private bool   _esperandoConfirm        = false;
-
-        // [FIX-D5] Contexto congelado en el momento del trigger
         private string _etiqPrimEnTrigger       = "";
         private string _etiqSecEnTrigger        = "";
 
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // UMBRALES (leídos de metadata.json)
+        // [FIX-U1] UMBRALES INDEPENDIENTES POR NIVEL
         // ════════════════════════════════════════════════════════════════════
         #region Umbrales
 
-        // [FIX-D4] umbralDivAbs se almacena como POSITIVO (ej: 53.8)
-        //          y se usa con Math.Abs(fnDisplay) en la clasificación.
-        private double _umbralFuerteAbs = 115.0;   // fallback
-        private double _umbralDivAbs    = 53.8;    // fallback (positivo)
+        // Todos almacenados como POSITIVOS. Se aplican con signo en DeterminarEtiqueta.
+        private double _umbralFuerteTerc = 390.0;   // fallback
+        private double _umbralDivTerc    = 370.0;   // fallback (positivo de -370)
+        private double _umbralFuerteSec  = 677.5;   // fallback
+        private double _umbralDivSec     = 680.0;   // fallback
+        private double _umbralFuertePrim = 1415.0;  // fallback
+        private double _umbralDivPrim    = 1216.2;  // fallback
+
+        // Etiqueta del nivel para log
+        private enum Nivel { Terciario, Secundario, Primario }
 
         #endregion
 
@@ -269,7 +259,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State == State.SetDefaults)
             {
-                Description = "Markov Trading Terciario v5.1 — Reversiones Multinivel";
+                Description = "Markov Trading Terciario v5.2 — Umbrales por Nivel";
                 Name        = "MarkovTradingTerciario";
 
                 PrimarioNTicks   = 360;
@@ -279,10 +269,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 TerciarioNTicks  = 40;
                 TerciarioEscape  = 24;
 
-                // [FIX-D4] UmbralDivergente como POSITIVO
-                UmbralFuertePositivo =  115;
-                UmbralFuerteNegativo = -115;
-                UmbralDivergente     =   53.8;   // positivo — se compara con Math.Abs
+                // [FIX-U1] Fallbacks por nivel (sobreescritos por metadata.json)
+                UmbralFuerteTercFallback  = 390.0;
+                UmbralFuerteSecFallback   = 677.5;
+                UmbralFuertePrimFallback  = 1415.0;
+                UmbralDivTercFallback     = 370.0;   // positivo
+                UmbralDivSecFallback      = 680.0;   // positivo
+                UmbralDivPrimFallback     = 1216.2;  // positivo
 
                 MaxContratos       = 2;
                 StopLossInicialPts = 10;
@@ -310,6 +303,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.DataLoaded)
             {
+                // Aplicar fallbacks de UI antes de intentar leer JSON
+                _umbralFuerteTerc = UmbralFuerteTercFallback;
+                _umbralFuerteSec  = UmbralFuerteSecFallback;
+                _umbralFuertePrim = UmbralFuertePrimFallback;
+                _umbralDivTerc    = UmbralDivTercFallback;
+                _umbralDivSec     = UmbralDivSecFallback;
+                _umbralDivPrim    = UmbralDivPrimFallback;
+
                 CargarUmbralesDesdeMetadata();
                 CargarReglas();
             }
@@ -318,7 +319,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // CARGA DE UMBRALES Y REGLAS
+        // [FIX-U1] CARGA DE UMBRALES POR NIVEL DESDE metadata.json
         // ════════════════════════════════════════════════════════════════════
         #region Carga
 
@@ -327,34 +328,82 @@ namespace NinjaTrader.NinjaScript.Strategies
             string rutaMeta = Path.Combine(RutaJsonDir, "metadata.json");
             if (!File.Exists(rutaMeta))
             {
-                Print("[MARKOV] metadata.json no encontrado — usando fallback: Fuerte="
-                    + _umbralFuerteAbs + " DivAbs=" + _umbralDivAbs);
+                Print("[MARKOV] metadata.json no encontrado — usando fallbacks UI");
                 return;
             }
             try
             {
-                string txt   = File.ReadAllText(rutaMeta);
-                int    idx   = txt.IndexOf("\"umbrales_estrategia\"");
-                if (idx < 0) { Print("[MARKOV] umbrales_estrategia no encontrado"); return; }
+                string txt = File.ReadAllText(rutaMeta);
 
-                int ini   = txt.IndexOf('{', idx);
-                int fin   = txt.IndexOf('}', ini);
-                string bl = txt.Substring(ini, fin - ini + 1);
+                // Intentar leer "umbrales_por_nivel" (v5.1+)
+                int idxPorNivel = txt.IndexOf("\"umbrales_por_nivel\"");
+                if (idxPorNivel >= 0)
+                {
+                    int blkIni = txt.IndexOf('{', idxPorNivel);
+                    int blkFin = CierreObjeto(txt, blkIni);
+                    string blk = txt.Substring(blkIni, blkFin - blkIni + 1);
 
-                double fuerteRaw = LeerDouble(bl, "\"umbral_fuerte\"");
-                double divRaw    = LeerDouble(bl, "\"umbral_divergente\"");   // viene negativo: -53.8
+                    // Terciario
+                    int iTer = blk.IndexOf("\"terciario\"");
+                    if (iTer >= 0)
+                    {
+                        int s = blk.IndexOf('{', iTer); int e = CierreObjeto(blk, s);
+                        string sub = blk.Substring(s, e - s + 1);
+                        _umbralFuerteTerc = Math.Abs(LeerDouble(sub, "\"umbral_fuerte\""));
+                        _umbralDivTerc    = Math.Abs(LeerDouble(sub, "\"umbral_divergente\""));
+                    }
+                    // Secundario
+                    int iSec = blk.IndexOf("\"secundario\"");
+                    if (iSec >= 0)
+                    {
+                        int s = blk.IndexOf('{', iSec); int e = CierreObjeto(blk, s);
+                        string sub = blk.Substring(s, e - s + 1);
+                        _umbralFuerteSec = Math.Abs(LeerDouble(sub, "\"umbral_fuerte\""));
+                        _umbralDivSec    = Math.Abs(LeerDouble(sub, "\"umbral_divergente\""));
+                    }
+                    // Primario
+                    int iPrim = blk.IndexOf("\"primario\"");
+                    if (iPrim >= 0)
+                    {
+                        int s = blk.IndexOf('{', iPrim); int e = CierreObjeto(blk, s);
+                        string sub = blk.Substring(s, e - s + 1);
+                        _umbralFuertePrim = Math.Abs(LeerDouble(sub, "\"umbral_fuerte\""));
+                        _umbralDivPrim    = Math.Abs(LeerDouble(sub, "\"umbral_divergente\""));
+                    }
 
-                // [FIX-D4] Guardar siempre como positivos
-                _umbralFuerteAbs = Math.Abs(fuerteRaw);
-                _umbralDivAbs    = Math.Abs(divRaw);
+                    Print("[MARKOV] Umbrales por nivel cargados de metadata.json (v5.1+):");
+                    Print(string.Format("   Terc  → Fuerte={0:F1}  Div={1:F1}", _umbralFuerteTerc, _umbralDivTerc));
+                    Print(string.Format("   Sec   → Fuerte={0:F1}  Div={1:F1}", _umbralFuerteSec,  _umbralDivSec));
+                    Print(string.Format("   Prim  → Fuerte={0:F1}  Div={1:F1}", _umbralFuertePrim, _umbralDivPrim));
+                    return;
+                }
 
-                Print("[MARKOV] Umbrales cargados de metadata.json:");
-                Print("   UmbralFuerteAbs = " + _umbralFuerteAbs);
-                Print("   UmbralDivAbs    = " + _umbralDivAbs);
+                // Fallback: leer "umbrales_estrategia" (metadata v5.0 — solo terciario)
+                int idxLeg = txt.IndexOf("\"umbrales_estrategia\"");
+                if (idxLeg >= 0)
+                {
+                    int ini = txt.IndexOf('{', idxLeg);
+                    int fin = CierreObjeto(txt, ini);
+                    string bl = txt.Substring(ini, fin - ini + 1);
+
+                    double fuerteRaw = LeerDouble(bl, "\"umbral_fuerte\"");
+                    double divRaw    = LeerDouble(bl, "\"umbral_divergente\"");
+
+                    // Aplicar solo al terciario; Sec y Prim quedan en fallback UI
+                    _umbralFuerteTerc = Math.Abs(fuerteRaw);
+                    _umbralDivTerc    = Math.Abs(divRaw);
+
+                    Print("[MARKOV] AVISO: metadata.json es v5.0 (umbrales_estrategia).");
+                    Print("   Solo se actualizaron umbrales del TERCIARIO.");
+                    Print("   Sec y Prim usan fallbacks UI. Regenerar con trainer v5.1+.");
+                    Print(string.Format("   Terc  → Fuerte={0:F1}  Div={1:F1}", _umbralFuerteTerc, _umbralDivTerc));
+                    Print(string.Format("   Sec   → Fuerte={0:F1}  (fallback)", _umbralFuerteSec));
+                    Print(string.Format("   Prim  → Fuerte={0:F1}  (fallback)", _umbralFuertePrim));
+                }
             }
             catch (Exception ex)
             {
-                Print("[MARKOV] Error leyendo metadata: " + ex.Message + " — usando fallback");
+                Print("[MARKOV] Error leyendo metadata: " + ex.Message + " — usando fallbacks UI");
             }
         }
 
@@ -398,7 +447,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // LOOP PRINCIPAL — [FIX-D1] Escape JERÁRQUICO igual que E1
+        // LOOP PRINCIPAL — [FIX-D1] Escape JERÁRQUICO
         // ════════════════════════════════════════════════════════════════════
         #region OnBarUpdate
 
@@ -407,14 +456,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (BarsInProgress != 0) return;
             if (CurrentBar < 2)      return;
 
-            // Inicializar geometría en la primera barra
             if (!_inicializado)
             {
                 _basePrim = _baseSec = _baseTerc = Close[0];
                 _inicializado = true;
 
-                // Calcular alturas y escapes en puntos
-                _alturaPrim      = PrimarioNTicks   * TickSize;
+                _alturaPrim       = PrimarioNTicks   * TickSize;
                 _alturaSecundario = SecundarioNTicks * TickSize;
                 _alturaTerciario  = TerciarioNTicks  * TickSize;
                 _escapePrim       = PrimarioEscape   * TickSize;
@@ -428,65 +475,45 @@ namespace NinjaTrader.NinjaScript.Strategies
             double high = High[0];
             double low  = Low[0];
 
-            // Acumular vela en el terciario activo
-            bool   esAlc      = Close[0] >= Open[0];
-            double fbVela     = esAlc
+            bool   esAlc  = Close[0] >= Open[0];
+            double fbVela = esAlc
                 ?  (high - low) / TickSize
                 : -(high - low) / TickSize;
             _fbBrutoTerc += fbVela;
             if (esAlc) { _sumAlcTerc += fbVela; _cntAlcTerc++; }
             else       { _sumBajTerc += fbVela; _cntBajTerc++; }
 
-            // Calcular zonas de escape para los 3 niveles
-            double supTerc  = _baseTerc + (_alturaTerciario  / 2) + _escapeTerciario;
-            double infTerc  = _baseTerc - (_alturaTerciario  / 2) - _escapeTerciario;
-            double supSec   = _baseSec  + (_alturaSecundario / 2) + _escapeSecundario;
-            double infSec   = _baseSec  - (_alturaSecundario / 2) - _escapeSecundario;
-            double supPrim  = _basePrim + (_alturaPrim       / 2) + _escapePrim;
-            double infPrim  = _basePrim - (_alturaPrim       / 2) - _escapePrim;
+            double supTerc = _baseTerc + (_alturaTerciario  / 2) + _escapeTerciario;
+            double infTerc = _baseTerc - (_alturaTerciario  / 2) - _escapeTerciario;
+            double supSec  = _baseSec  + (_alturaSecundario / 2) + _escapeSecundario;
+            double infSec  = _baseSec  - (_alturaSecundario / 2) - _escapeSecundario;
+            double supPrim = _basePrim + (_alturaPrim       / 2) + _escapePrim;
+            double infPrim = _basePrim - (_alturaPrim       / 2) - _escapePrim;
 
-            // [FIX-D1] Evaluar en orden jerárquico — solo procesar UN nivel por barra
             _escapeSuperiorEnCurso = false;
 
             if (high > supPrim || low < infPrim)
             {
-                // ── ESCAPE PRIMARIO ──────────────────────────────────────
                 _escapeSuperiorEnCurso = true;
                 string dir = (high > supPrim) ? "ALCISTA" : "BAJISTA";
-
-                // 1. Cerrar terciario (dentro de la cascada)
                 CerrarTerciarioEnCascada(dir);
-
-                // 2. Cerrar secundario
                 CerrarSecundarioEnCascada(dir);
-
-                // 3. Cerrar primario
                 CerrarPrimario(dir);
-
-                // 4. Crear nuevo primario, secundario, terciario
                 CrearNuevoPrimario(dir);
                 CrearNuevoSecundario(dir);
                 CrearNuevoTerciario(dir);
             }
             else if (high > supSec || low < infSec)
             {
-                // ── ESCAPE SECUNDARIO ────────────────────────────────────
                 _escapeSuperiorEnCurso = true;
                 string dir = (high > supSec) ? "ALCISTA" : "BAJISTA";
-
-                // 1. Cerrar terciario (dentro de la cascada)
                 CerrarTerciarioEnCascada(dir);
-
-                // 2. Cerrar secundario
                 CerrarSecundario(dir);
-
-                // 3. Crear nuevo secundario y terciario
                 CrearNuevoSecundario(dir);
                 CrearNuevoTerciario(dir);
             }
             else if (high > supTerc || low < infTerc)
             {
-                // ── ESCAPE TERCIARIO ─────────────────────────────────────
                 string dir = (high > supTerc) ? "ALCISTA" : "BAJISTA";
                 CerrarTerciario(dir);
                 CrearNuevoTerciario(dir);
@@ -503,47 +530,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         // ════════════════════════════════════════════════════════════════════
         #region Cierre
 
-        // Cierre de terciario en escape PROPIO (genera señal)
         private void CerrarTerciario(string dir)
         {
             double fn        = CalcularFN(_cntAlcTerc, _sumAlcTerc, _cntBajTerc, _sumBajTerc);
             double fnDisplay = Math.Round(fn * 10, 2);
 
-            // [FIX-D4] Clasificación con zona COHERENTE correcta
-            string etiq = DeterminarEtiqueta(dir, fnDisplay);
+            // [FIX-U1] Clasificar con umbrales del nivel TERCIARIO
+            string etiq = DeterminarEtiqueta(dir, fnDisplay, Nivel.Terciario);
 
-            // Acumular en secundario
             AcumularEnSecundario(dir, _fbBrutoTerc);
 
             if (MostrarBloques)
                 Print("🟪 Terc → " + etiq
                     + " | FN_D: " + fnDisplay.ToString("F1")
-                    + (_esperandoConfirm ? " [ESPERANDO CONFIRM]" : ""));
+                    + (_esperandoConfirm ? " [ESP.CONFIRM]" : ""));
 
-            // Recalcular etiqueta del secundario activo
             ActualizarEtiqSecActivo();
-
-            // Evaluar máquina de señal
             ProcesarEtiquetaTerciario(etiq, fnDisplay);
-
             ResetAcumuladoresTerc();
         }
 
-        // Cierre de terciario dentro de una cascada de escape superior
-        // No actualiza la señal porque el contexto se va a resetear
         private void CerrarTerciarioEnCascada(string dir)
         {
             double fn        = CalcularFN(_cntAlcTerc, _sumAlcTerc, _cntBajTerc, _sumBajTerc);
             double fnDisplay = Math.Round(fn * 10, 2);
-            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
+            string etiq      = DeterminarEtiqueta(dir, fnDisplay, Nivel.Terciario);
 
-            // Acumular en secundario
             AcumularEnSecundario(dir, _fbBrutoTerc);
 
             if (MostrarBloques)
                 Print("🟪 Terc (cascada) → " + etiq + " | FN_D: " + fnDisplay.ToString("F1"));
 
-            // En cascada: cancelar cualquier trigger pendiente (contexto cambia)
             if (_esperandoConfirm)
             {
                 _esperandoConfirm = false;
@@ -552,7 +569,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (MostrarBloques)
                     Print("   ⚠️ Trigger cancelado por escape superior");
             }
-
             ResetAcumuladoresTerc();
         }
 
@@ -560,9 +576,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             double fn        = CalcularFN(_cntAlcSec, _sumAlcSec, _cntBajSec, _sumBajSec);
             double fnDisplay = Math.Round(fn * 10, 2);
-            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
 
-            // Acumular en primario con el FB del secundario
+            // [FIX-U1] Clasificar con umbrales del nivel SECUNDARIO
+            string etiq = DeterminarEtiqueta(dir, fnDisplay, Nivel.Secundario);
+
             double fbSec = _sumAlcSec + _sumBajSec;
             AcumularEnPrimario(dir, fbSec);
             ActualizarEtiqPrimActivo();
@@ -574,14 +591,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             _etiqSecActivo = "";
         }
 
-        // Alias para legibilidad en cascada de primario
         private void CerrarSecundarioEnCascada(string dir) { CerrarSecundario(dir); }
 
         private void CerrarPrimario(string dir)
         {
             double fn        = CalcularFN(_cntAlcPrim, _sumAlcPrim, _cntBajPrim, _sumBajPrim);
             double fnDisplay = Math.Round(fn * 10, 2);
-            string etiq      = DeterminarEtiqueta(dir, fnDisplay);
+
+            // [FIX-U1] Clasificar con umbrales del nivel PRIMARIO
+            string etiq = DeterminarEtiqueta(dir, fnDisplay, Nivel.Primario);
 
             if (MostrarBloques)
                 Print("🟥 Prim → " + etiq + " | FN_D: " + fnDisplay.ToString("F1"));
@@ -599,7 +617,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void CrearNuevoTerciario(string dir)
         {
-            _baseTerc    = (dir == "ALCISTA")
+            _baseTerc = (dir == "ALCISTA")
                 ? _baseTerc + _alturaTerciario
                 : _baseTerc - _alturaTerciario;
             _dirTercActivo = dir;
@@ -608,7 +626,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void CrearNuevoSecundario(string dir)
         {
-            _baseSec     = (dir == "ALCISTA")
+            _baseSec = (dir == "ALCISTA")
                 ? _baseSec + _alturaSecundario
                 : _baseSec - _alturaSecundario;
             _dirSecActivo = dir;
@@ -618,7 +636,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void CrearNuevoPrimario(string dir)
         {
-            _basePrim    = (dir == "ALCISTA")
+            _basePrim = (dir == "ALCISTA")
                 ? _basePrim + _alturaPrim
                 : _basePrim - _alturaPrim;
             _dirPrimActivo = dir;
@@ -649,14 +667,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             double fn        = CalcularFN(_cntAlcSec, _sumAlcSec, _cntBajSec, _sumBajSec);
             double fnDisplay = Math.Round(fn * 10, 2);
-            _etiqSecActivo   = DeterminarEtiqueta(_dirSecActivo, fnDisplay);
+            // [FIX-U1] Usar umbral SECUNDARIO para etiquetar el secundario activo
+            _etiqSecActivo   = DeterminarEtiqueta(_dirSecActivo, fnDisplay, Nivel.Secundario);
         }
 
         private void ActualizarEtiqPrimActivo()
         {
             double fn        = CalcularFN(_cntAlcPrim, _sumAlcPrim, _cntBajPrim, _sumBajPrim);
             double fnDisplay = Math.Round(fn * 10, 2);
-            _etiqPrimActivo  = DeterminarEtiqueta(_dirPrimActivo, fnDisplay);
+            // [FIX-U1] Usar umbral PRIMARIO para etiquetar el primario activo
+            _etiqPrimActivo  = DeterminarEtiqueta(_dirPrimActivo, fnDisplay, Nivel.Primario);
         }
 
         #endregion
@@ -670,14 +690,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!_esperandoConfirm)
             {
-                // ── PASO 1: ¿Es un TRIGGER? ──────────────────────────────
                 if (etiq.Contains("DIVERGENTE_FUERTE"))
                 {
                     _etiqTrigger      = etiq;
                     _fnDisplayTrigger = fnDisplay;
                     _esperandoConfirm = true;
-
-                    // [FIX-D5] Congelar contexto activo en el momento del trigger
                     _etiqPrimEnTrigger = _etiqPrimActivo;
                     _etiqSecEnTrigger  = _etiqSecActivo;
 
@@ -690,29 +707,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            // ── PASO 2: Esperando CONFIRM ─────────────────────────────────
             bool esConfirmValido = etiq.EndsWith("FUERTE") && !etiq.Contains("DIVERGENTE");
 
             if (esConfirmValido)
             {
-                // CONFIRM recibido → evaluar señal
                 if (MostrarBloques)
                     Print("   🟢 CONFIRM: " + etiq + " → Evaluando señal...");
-
                 EvaluarSenales(etiq);
-
-                // Limpiar estado
                 _esperandoConfirm = false;
                 _etiqTrigger      = "";
                 _fnDisplayTrigger = 0;
             }
             else if (etiq.Contains("DIVERGENTE_FUERTE"))
             {
-                // [FIX-B2] Nuevo DIVERGENTE_FUERTE reemplaza al anterior trigger
+                // [FIX-B2] Nuevo trigger reemplaza al anterior
                 _etiqTrigger      = etiq;
                 _fnDisplayTrigger = fnDisplay;
-
-                // [FIX-D5] Actualizar contexto congelado
                 _etiqPrimEnTrigger = _etiqPrimActivo;
                 _etiqSecEnTrigger  = _etiqSecActivo;
 
@@ -721,8 +731,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                         + " | Prim=" + _etiqPrimEnTrigger
                         + " Sec="   + _etiqSecEnTrigger);
             }
-            // [FIX-B2] Cualquier otra etiqueta (COHERENTE, DEBIL) → NO cancelar.
-            //          Seguir esperando el confirm.
             else
             {
                 if (MostrarBloques)
@@ -732,22 +740,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void EvaluarSenales(string etiqConfirm)
         {
-            if (_reglas == null || _reglas.Count == 0)     return;
-            if (string.IsNullOrEmpty(_etiqPrimEnTrigger))  return;
-            if (string.IsNullOrEmpty(_etiqSecEnTrigger))   return;
-            if (string.IsNullOrEmpty(_etiqTrigger))        return;
-            if (!DentroDeHorario())                        return;
+            if (_reglas == null || _reglas.Count == 0)    return;
+            if (string.IsNullOrEmpty(_etiqPrimEnTrigger)) return;
+            if (string.IsNullOrEmpty(_etiqSecEnTrigger))  return;
+            if (string.IsNullOrEmpty(_etiqTrigger))       return;
+            if (!DentroDeHorario())                       return;
             if (Position.MarketPosition != MarketPosition.Flat) return;
 
             foreach (var regla in _reglas)
             {
-                // [FIX-D5] Usar contexto congelado al momento del trigger
                 if (!ListaContiene(regla.PrimarioCoherencia,   _etiqPrimEnTrigger)) continue;
                 if (!ListaContiene(regla.SecundarioCoherencia, _etiqSecEnTrigger))  continue;
                 if (!ListaContiene(regla.TriggerCoherencia,    _etiqTrigger))       continue;
                 if (!ListaContiene(regla.ConfirmCoherencia,    etiqConfirm))        continue;
 
-                // Filtro FN del trigger
                 if (regla.FnTriggerMinAbs > 0 &&
                     Math.Abs(_fnDisplayTrigger) < regla.FnTriggerMinAbs)
                 {
@@ -783,7 +789,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         #endregion
 
         // ════════════════════════════════════════════════════════════════════
-        // CÁLCULOS FN Y CLASIFICACIÓN
+        // [FIX-U1 + FIX-U2] CÁLCULO FN Y CLASIFICACIÓN POR NIVEL
         // ════════════════════════════════════════════════════════════════════
         #region Calculos
 
@@ -794,19 +800,37 @@ namespace NinjaTrader.NinjaScript.Strategies
             return compAlc + compBaj;
         }
 
-        // [FIX-D4] Clasificación idéntica al exportador E1:
+        // [FIX-U1] Recibe el nivel para aplicar el umbral correcto.
+        // [FIX-U2] fnDisplay <= 0 en BAJISTA → COHERENTE (corrige edge case fnDisplay=0).
+        //
+        // Lógica idéntica al exportador MultiBricksDataExporterNeta:
         //   ALCISTA: > umbFuerte → FUERTE
         //            > 0         → COHERENTE
         //            > -umbDiv   → DIV_DEBIL
         //            else        → DIV_FUERTE
         //   BAJISTA: < -umbFuerte → FUERTE
-        //            < 0          → COHERENTE
-        //            < umbDiv     → DIV_DEBIL   (equiv. < -(-umbDiv))
+        //            <= 0         → COHERENTE   ← FIX-U2: era < 0
+        //            < umbDiv     → DIV_DEBIL
         //            else         → DIV_FUERTE
-        private string DeterminarEtiqueta(string dir, double fnDisplay)
+        private string DeterminarEtiqueta(string dir, double fnDisplay, Nivel nivel)
         {
-            double umbFuerte = _umbralFuerteAbs;   // positivo, ej: 115
-            double umbDiv    = _umbralDivAbs;       // positivo, ej: 53.8
+            // [FIX-U1] Seleccionar umbrales según el nivel
+            double umbFuerte, umbDiv;
+            switch (nivel)
+            {
+                case Nivel.Secundario:
+                    umbFuerte = _umbralFuerteSec;
+                    umbDiv    = _umbralDivSec;
+                    break;
+                case Nivel.Primario:
+                    umbFuerte = _umbralFuertePrim;
+                    umbDiv    = _umbralDivPrim;
+                    break;
+                default: // Terciario
+                    umbFuerte = _umbralFuerteTerc;
+                    umbDiv    = _umbralDivTerc;
+                    break;
+            }
 
             if (dir == "ALCISTA")
             {
@@ -818,7 +842,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             else
             {
                 if (fnDisplay < -umbFuerte) return "BAJISTA_FUERTE";
-                if (fnDisplay <  0)         return "BAJISTA_COHERENTE";
+                if (fnDisplay <= 0)         return "BAJISTA_COHERENTE";   // [FIX-U2] era < 0
                 if (fnDisplay <  umbDiv)    return "BAJISTA_DIVERGENTE_DEBIL";
                 return                             "BAJISTA_DIVERGENTE_FUERTE";
             }
@@ -906,8 +930,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             string nombre = (_direccionOp == "LONG") ? NombreLong : NombreShort;
 
             SetStopLoss(nombre, CalculationMode.Ticks, slTicks, false);
-            SetProfitTarget(nombre, CalculationMode.Ticks,
-                MaxContratos == 2 ? tp1Ticks : tp2Ticks);
+
+            // MaxContratos=2 → TP1 para el primer contrato (el segundo se gestiona vía breakeven)
+            // MaxContratos=1 → TP1 también (contrato único con el objetivo conservador)
+            // Si quieres TP2 con 1 contrato, cambia tp1Ticks por tp2Ticks en la línea siguiente
+            SetProfitTarget(nombre, CalculationMode.Ticks, tp1Ticks);
 
             double slRef  = (_direccionOp == "LONG")
                 ? _precioEntrada - StopLossInicialPts : _precioEntrada + StopLossInicialPts;
@@ -918,7 +945,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Print("   SL @ " + slRef.ToString("F2")
                 + " | TP1 @ " + tp1Ref.ToString("F2")
-                + " | TP2 @ " + tp2Ref.ToString("F2"));
+                + " | TP2 @ " + tp2Ref.ToString("F2") + " (post-BE)");
         }
 
         private void ActivarBreakeven()
@@ -960,6 +987,17 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (lista == null || lista.Count == 0) return true;
             return lista.Contains(valor);
+        }
+
+        private int CierreObjeto(string t, int ini)
+        {
+            int d = 0;
+            for (int i = ini; i < t.Length; i++)
+            {
+                if      (t[i] == '{') d++;
+                else if (t[i] == '}') { d--; if (d == 0) return i; }
+            }
+            return -1;
         }
 
         private double LeerDouble(string json, string clave)
@@ -1050,7 +1088,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 r.Id     = Str(obj, "\"id\"");
                 r.Nombre = Str(obj, "\"nombre\"");
 
-                // Accion desde logica_entrada o parametros
                 int ilg = obj.IndexOf("\"logica_entrada\"");
                 if (ilg >= 0)
                 {
@@ -1069,7 +1106,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                 }
 
-                // Condiciones
                 int ic = obj.IndexOf("\"condiciones\"");
                 if (ic >= 0)
                 {
@@ -1084,7 +1120,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     r.FnTriggerMinAbs      = Dbl(co,   "\"fn_trigger_min_abs\"");
                 }
 
-                // Estadísticas
                 int ie = obj.IndexOf("\"estadisticas\"");
                 if (ie >= 0)
                 {
